@@ -1,17 +1,60 @@
 import csv
 import json
 import requests
+import os
+from datetime import date
+from collections import defaultdict
 
 
 API_KEY = "853b8fac3341fda"
 API_SECRET = "2a38fe394557601"
 
+# Nombre de los archivos a generar
+archivo_crudo = "crudo.csv" #para el crudo de las OT
+archivo_Series = "series_frappe.csv" #para el listado de series de frappe
+archivo_productos = "productos.csv" #para el listado de productos
+archivo_ONT = "columnas_extraidasONT.csv" #columnas de extraccion de datos ONT
+archivo_DECO = "columnas_extraidasDeco.csv" #columnas de extraccion de datos Decos
+archivo_consumibles = "reporte_consumibles.csv" #cables usados
+
+
+def borrar_archivos_csv():
+    for archivo in [archivo_crudo, archivo_Series, archivo_productos, archivo_ONT, archivo_DECO, archivo_consumibles]:
+        if os.path.exists(archivo):
+            os.remove(archivo)
+            print(f"🧹 Archivo eliminado: {archivo}")
+
+def hay_que_revisar(only_boolean=False):
+    def tiene_pendientes(archivo):
+        with open(archivo, newline='', encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for fila in reader:
+                if fila.get("Transferencia?", "").strip() or fila.get("No recibido", "").strip():
+                    return True
+        return False
+
+    pendientes_ont = tiene_pendientes(archivo_ONT)
+    pendientes_deco = tiene_pendientes(archivo_DECO)
+
+    if only_boolean:
+        return pendientes_ont or pendientes_deco
+
+    hay_pendientes = False
+
+    if pendientes_ont:
+        print(f"⚠️ Aún hay equipos en '{archivo_ONT}' que requieren transferencia o no fueron recibidos.")
+        hay_pendientes = True
+
+    if pendientes_deco:
+        print(f"⚠️ Aún hay equipos en '{archivo_DECO}' que requieren transferencia o no fueron recibidos.")
+        hay_pendientes = True
+
+    return hay_pendientes
+
+
 def obtenerCrudo():
     # URL del CSV desde Google Sheets
     url_csv = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSjcvuqJyiIwCYdSkAT7WGHYnGFvti3BaiswovWWWMgSTwdbVXKZQU1KrLXeiT5wJSpoqSEP9IuJ9V6/pub?gid=549752266&single=true&output=csv"
-
-    # Nombre del archivo local
-    archivo_crudo = "crudo.csv"
 
     # Paso 1: Descargar el archivo CSV
     print("Descargando CSV...")
@@ -43,7 +86,6 @@ def obtenerCrudo():
 def obtenerSeriesFrappe():
     print("Consultando series en Frappe...")
     
-    archivo_Series = "series_frappe.csv"
     FRAPPE_API = "http://localhost/api/resource/Serial%20No"
     HEADERS = {
         "Authorization": f"token {API_KEY}:{API_SECRET}"
@@ -85,10 +127,43 @@ def obtenerSeriesFrappe():
         print(f"❌ Error al hacer la solicitud a Frappe: {e}")
 
 
-def extraer_columnas():
-    archivo_entrada = "crudo.csv"
-    archivo_salida = "columnas_extraidasONT.csv"
-    archivo_series = "series_frappe.csv"
+
+def obtenerProductos():
+    print("Descargando productos desde Frappe...")
+
+    FRAPPE_API = "http://localhost/api/resource/Item"
+    HEADERS = {
+        "Authorization": f"token {API_KEY}:{API_SECRET}"
+    }
+
+    campos = ["item_code", "item_name"]
+    fields_param = json.dumps(campos)
+    url = f"{FRAPPE_API}?fields={fields_param}&limit_page_length=1000"
+
+    try:
+        response = requests.get(url, headers=HEADERS)
+        response.raise_for_status()
+        data = response.json().get("data", [])
+
+        with open(archivo_productos, "w", newline='', encoding="utf-8") as f_out:
+            writer = csv.writer(f_out)
+            writer.writerow(["item_code", "item_name"])
+            for prod in data:
+                writer.writerow([
+                    prod.get("item_code", "").strip(),
+                    prod.get("item_name", "").strip()
+                ])
+
+        print(f"✅ {len(data)} productos guardados en 'productos.csv'")
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Error al descargar productos: {e}")
+
+
+#--------------------------------------------------------------
+
+def extraer_columnas_ont():
+    archivo_entrada = archivo_crudo 
+    archivo_salida = archivo_ONT
 
     encabezados = [
         "ONT (modem fibra)",
@@ -103,7 +178,7 @@ def extraer_columnas():
 
     # Leer series_frappe.csv y construir un diccionario {serie: warehouse}
     dic_ont_origen = {}
-    with open(archivo_series, newline='', encoding="utf-8") as f_series:
+    with open(archivo_Series, newline='', encoding="utf-8") as f_series:
         reader_series = csv.reader(f_series)
         next(reader_series)  # saltar encabezado
         for fila in reader_series:
@@ -170,9 +245,8 @@ def extraer_columnas():
 
 
 def extraer_columnas_deco():
-    archivo_entrada = "crudo.csv"
-    archivo_salida = "columnas_extraidasDeco.csv"
-    archivo_series = "series_frappe.csv"
+    archivo_entrada = archivo_crudo
+    archivo_salida = archivo_DECO
 
     encabezados = [
         "Deco",
@@ -187,7 +261,7 @@ def extraer_columnas_deco():
 
     # Leer series_frappe.csv y construir un diccionario {serie: warehouse}
     dic_deco_origen = {}
-    with open(archivo_series, newline='', encoding="utf-8") as f_series:
+    with open(archivo_Series, newline='', encoding="utf-8") as f_series:
         reader_series = csv.reader(f_series)
         next(reader_series)  # saltar encabezado
         for fila in reader_series:
@@ -253,10 +327,284 @@ def extraer_columnas_deco():
     print(f"✅ Archivo '{archivo_salida}' generado con {len(filas_salida)} filas.")
 
 
+def extraer_consumibles():
+    archivo_salida = archivo_consumibles
+    item_code_fijo = "20710003"
+    item_code_extra1 = "110100372"
+    item_code_extra2 = "320500065"
+    
+    # 1. Cargar diccionario de productos
+    productos = {}
+    with open(archivo_productos, newline='', encoding="utf-8") as f_prod:
+        reader = csv.DictReader(f_prod)
+        for row in reader:
+            codigo = row["item_code"].strip()
+            nombre = row["item_name"].strip()
+            productos[codigo] = nombre
+
+    # 2. Contar ocurrencias por (item_code, warehouse)
+    conteo = defaultdict(lambda: defaultdict(int))  # conteo[item_code][warehouse] = cantidad
+
+    # 🔸 Consumibles desde archivo_crudo (columna N y O)
+    with open(archivo_crudo, newline='', encoding="utf-8") as f_crudo:
+        reader = csv.reader(f_crudo)
+        for fila in reader:
+            if len(fila) > 14:
+                campo_cable = fila[13].strip()  # columna N
+                campo_consumible = fila[14].strip()  # columna O
+                cargo_ot_base = fila[3].strip()  # columna D
+                warehouse = f"{cargo_ot_base} - QPS" if cargo_ot_base else ""
+
+                # 🔹 Cables (de columna N)
+                if " - " in campo_cable:
+                    item_code = campo_cable.split(" - ")[0].strip()
+                    if item_code:
+                        conteo[item_code][warehouse] += 1
+
+                # 🔹 Cantidades para item_code fijo (de columna O)
+                if campo_consumible:
+                    try:
+                        cantidad = int(campo_consumible)
+                        conteo[item_code_fijo][warehouse] += cantidad
+                    except ValueError:
+                        print(f"⚠️ Valor no numérico ignorado en columna O: {campo_consumible}")
+
+    # 🔸 Serializados desde archivo_DECO
+    seriales_por_almacen = defaultdict(int)
+    with open(archivo_DECO, newline='', encoding="utf-8") as f_deco:
+        reader = csv.DictReader(f_deco)
+        for fila in reader:
+            serie = fila.get("Consumir", "").strip()
+            almacen = fila.get("Cargó OT", "").strip()
+            if serie and almacen:
+                warehouse = f"{almacen} - QPS"
+                seriales_por_almacen[warehouse] += 1
+
+    for warehouse, cantidad in seriales_por_almacen.items():
+        conteo[item_code_extra1][warehouse] += cantidad
+        conteo[item_code_extra2][warehouse] += cantidad * 2
+
+    # 3. Generar archivo de salida
+    filas_totales = 0
+    with open(archivo_salida, "w", newline='', encoding="utf-8") as f_out:
+        writer = csv.writer(f_out)
+        writer.writerow(["item_code", "item_name", "warehouse", "qty"])
+
+        for item_code, almacenes in conteo.items():
+            item_name = productos.get(item_code, "❓ DESCONOCIDO")
+            for warehouse, qty in almacenes.items():
+                writer.writerow([item_code, item_name, warehouse, qty])
+                filas_totales += 1
+
+    print(f"✅ Archivo '{archivo_salida}' generado con {filas_totales} filas.")
+
+
+# ------------------------------------------------
+def deliveryNote():
+    if hay_que_revisar():
+        print("🚫 No se generó la nota de entrega. Revisá los archivos antes de continuar.")
+        return
+
+    FRAPPE_API = "http://localhost/api/resource/Delivery%20Note"
+    COMMENT_API = "http://localhost/api/resource/Communication"
+    HEADERS = {
+        "Authorization": f"token {API_KEY}:{API_SECRET}",
+        "Content-Type": "application/json"
+    }
+
+    cliente = "Instalado"
+    archivos_consumir = [archivo_ONT, archivo_DECO]
+
+    def texto_a_html(texto):
+        return texto.replace('\\n', '<br>').replace('\\t', '&emsp;')
+
+    def agregar_comentario(nombre_doc, comentario_html, remitente="aguida@qpsrl.com.ar"):
+        payload = {
+            "doctype": "Communication",
+            "communication_type": "Comment",
+            "comment_type": "Comment",
+            "reference_doctype": "Delivery Note",
+            "reference_name": nombre_doc,
+            "content": f"<div>{comentario_html}</div>",
+            "sender": remitente
+        }
+
+        response = requests.post(COMMENT_API, headers=HEADERS, json=payload)
+        if response.status_code == 200:
+            print("🗨️ Comentario agregado correctamente.")
+        else:
+            print("❌ Error al agregar comentario:")
+            print(response.status_code, response.text)
+
+    def comentarios_en_tabla_html():
+        comentarios = defaultdict(list)
+        with open(archivo_crudo, newline='', encoding="utf-8") as f:
+            reader = csv.reader(f)
+            for fila in reader:
+                if len(fila) >= 15:
+                    almacen = fila[3].strip()  # columna D
+                    if not almacen:
+                        continue
+                    fila_html = "".join(f"<td>{celda.strip()}</td>" for celda in fila[:15])
+                    comentarios[f"{almacen} - QPS"].append(f"<tr>{fila_html}</tr>")
+        return comentarios
+
+    comentarios_por_almacen = comentarios_en_tabla_html()
+
+    dic_series = {}
+    with open(archivo_Series, newline='', encoding="utf-8") as f_series:
+        reader = csv.reader(f_series)
+        next(reader)
+        for fila in reader:
+            if len(fila) > 5:
+                serie = fila[1].strip()
+                item_code = fila[3].strip()
+                item_name = fila[4].strip()
+                dic_series[serie] = {
+                    "item_code": item_code,
+                    "item_name": item_name
+                }
+
+    agrupados = defaultdict(lambda: defaultdict(lambda: {
+        "qty": 0,
+        "seriales": []
+    }))
+    seriales_usados = set()
+    for archivo in archivos_consumir:
+        with open(archivo, newline='', encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for fila in reader:
+                serie = fila.get("Consumir", "").strip()
+                almacen = fila.get("Cargó OT", "").strip()
+                if not serie or not almacen:
+                    continue
+                if serie in seriales_usados:
+                    print(f"⚠️ Serie duplicada ignorada: {serie}")
+                    continue
+                if serie not in dic_series:
+                    print(f"⚠️ Serie no encontrada en {archivo_Series}: {serie}")
+                    continue
+                info = dic_series[serie]
+                key = (info["item_code"], info["item_name"])
+                agrupados[almacen][key]["qty"] += 1
+                agrupados[almacen][key]["seriales"].append(serie)
+                seriales_usados.add(serie)
+
+    consumibles_por_almacen = defaultdict(list)
+    with open(archivo_consumibles, newline='', encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            item_code = row["item_code"].strip()
+            item_name = row["item_name"].strip()
+            warehouse = row["warehouse"].strip()
+            try:
+                qty = int(row["qty"])
+                if qty > 0:
+                    consumibles_por_almacen[warehouse].append({
+                        "item_code": item_code,
+                        "item_name": item_name,
+                        "qty": qty,
+                        "warehouse": warehouse
+                    })
+            except ValueError:
+                print(f"⚠️ Cantidad inválida en consumibles: {row['qty']}")
+
+    todos_los_almacenes = set(agrupados.keys()) | set(consumibles_por_almacen.keys())
+    for almacen in todos_los_almacenes:
+        items = []
+
+        for (item_code, item_name), datos in agrupados.get(almacen, {}).items():
+            items.append({
+                "item_code": item_code,
+                "item_name": item_name,
+                "qty": datos["qty"],
+                "warehouse": almacen,
+                "serial_no": "\n".join(datos["seriales"])
+            })
+
+        for prod in consumibles_por_almacen.get(almacen, []):
+            items.append({
+                "item_code": prod["item_code"],
+                "item_name": prod["item_name"],
+                "qty": prod["qty"],
+                "warehouse": almacen
+            })
+
+        if not items:
+            continue
+
+        filas_html = comentarios_por_almacen.get(almacen, [])
+        comentario_html = ""
+        if filas_html:
+            comentario_html = (
+                "<b>Detalle de equipos cargados:</b><br>"
+                "<table border='1' cellpadding='4' cellspacing='0'>"
+                f"{''.join(filas_html)}"
+                "</table>"
+            )
+
+        payload = {
+            "customer": cliente,
+            "posting_date": str(date.today()),
+            "set_warehouse": almacen,
+            "items": items,
+            "remarks": comentario_html
+        }
+
+        print(f"📦 Enviando nota de entrega para '{almacen}' con {len(items)} ítems...")
+        response = requests.post(FRAPPE_API, headers=HEADERS, json=payload)
+
+        if response.status_code == 200:
+            docname = response.json()["data"]["name"]
+            print(f"✅ Nota de entrega creada: {docname}")
+            if comentario_html:
+                agregar_comentario(docname, comentario_html)
+        else:
+            print(f"❌ Error al crear nota de entrega para {almacen}:")
+            print(response.status_code, response.text)
+
+
+
+def ultimaOTconsumida():
+    archivo = archivo_crudo
+    ultima_fila = None
+    with open(archivo, newline='', encoding="utf-8") as f:
+        reader = csv.reader(f)
+        for fila in reader:
+            ultima_fila = fila
+    if ultima_fila and len(ultima_fila) > 5:
+        print()
+        print()
+        print(f"Último valor columna F en '{archivo}': {ultima_fila[5]}")
+        print()
+        print()
+    else:
+        print(f"No se pudo leer la columna F en la última fila de '{archivo}'.")
+
+
+
 def main():
+    os.system("clear")
+
+    borrar_archivos_csv()  # Limpieza previa
+
+    #obtencion de datos
     obtenerCrudo()
     obtenerSeriesFrappe()
-    extraer_columnas()
+    obtenerProductos()
+
+    #procesamiento
+    extraer_columnas_ont()
     extraer_columnas_deco()
+    extraer_consumibles()
+
+    # Deliverys
+    print()
+    print()
+    deliveryNote()
+    
+    if not hay_que_revisar(only_boolean=True):
+        ultimaOTconsumida()
+        borrar_archivos_csv()  # Limpieza final solo si todo salió bien
 
 main()
