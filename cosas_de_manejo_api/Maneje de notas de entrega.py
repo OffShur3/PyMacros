@@ -2,6 +2,8 @@ import csv
 import json
 import requests
 import os
+import sys
+import webbrowser
 from datetime import date
 from collections import defaultdict
 
@@ -16,6 +18,8 @@ archivo_productos = "productos.csv" #para el listado de productos
 archivo_ONT = "columnas_extraidasONT.csv" #columnas de extraccion de datos ONT
 archivo_DECO = "columnas_extraidasDeco.csv" #columnas de extraccion de datos Decos
 archivo_consumibles = "reporte_consumibles.csv" #cables usados
+
+FRAPPE_API = "http://localhost/api/resource"
 
 
 def borrar_archivos_csv():
@@ -53,40 +57,39 @@ def hay_que_revisar(only_boolean=False):
 
 
 def obtenerCrudo():
-    # URL del CSV desde Google Sheets
     url_csv = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSjcvuqJyiIwCYdSkAT7WGHYnGFvti3BaiswovWWWMgSTwdbVXKZQU1KrLXeiT5wJSpoqSEP9IuJ9V6/pub?gid=549752266&single=true&output=csv"
 
-    # Paso 1: Descargar el archivo CSV
     print("Descargando CSV...")
     resp = requests.get(url_csv)
     resp.raise_for_status()
 
-    # Decodificar contenido con UTF-8 explícitamente
     lineas = resp.content.decode("utf-8").splitlines()
 
-    # Paso 2: Leer las líneas y filtrar filas con columna A vacía y estado correcto
     print("Filtrando filas que no hayan sido consumidas...")
-
     reader = csv.reader(lineas, delimiter=',')
     filas_filtradas = [
         fila for fila in reader
-        if len(fila) > 25 and fila[4].strip() == "" and ( #fila E
+        if len(fila) > 25 and fila[4].strip() == "" and (
             fila[23].strip() == "EXITOSA" or
-            fila[23].strip() == "CONTINGENCIA / SUSPENDIDA" #fila x
+            fila[23].strip() == "CONTINGENCIA / SUSPENDIDA"
         )
     ]
 
-    # Paso 3: Sobrescribir crudo.csv con los resultados filtrados
+    if not filas_filtradas:
+        print("🚫 No hay filas pendientes de consumo. Terminando ejecución.")
+        sys.exit(0)
+
     with open(archivo_crudo, "w", newline='', encoding="utf-8") as f_out:
         writer = csv.writer(f_out, delimiter=',')
         writer.writerows(filas_filtradas)
 
     print(f"✅ Filtrado completo. {len(filas_filtradas)} filas guardadas en '{archivo_crudo}'")
 
+
 def obtenerSeriesFrappe():
     print("Consultando series en Frappe...")
     
-    FRAPPE_API = "http://localhost/api/resource/Serial%20No"
+    FRAPPE_API_serie = FRAPPE_API+"/Serial%20No"
     HEADERS = {
         "Authorization": f"token {API_KEY}:{API_SECRET}"
     }
@@ -97,7 +100,7 @@ def obtenerSeriesFrappe():
     ]
 
     fields_param = json.dumps(campos)  # ✅ Convierte a JSON válido
-    url = f"{FRAPPE_API}?fields={fields_param}&limit_page_length=1000"
+    url = f"{FRAPPE_API_serie}?fields={fields_param}&limit_page_length=1000"
 
     try:
         response = requests.get(url, headers=HEADERS)
@@ -131,14 +134,14 @@ def obtenerSeriesFrappe():
 def obtenerProductos():
     print("Descargando productos desde Frappe...")
 
-    FRAPPE_API = "http://localhost/api/resource/Item"
+    FRAPPE_API_prod = FRAPPE_API+"/Item"
     HEADERS = {
         "Authorization": f"token {API_KEY}:{API_SECRET}"
     }
 
     campos = ["item_code", "item_name"]
     fields_param = json.dumps(campos)
-    url = f"{FRAPPE_API}?fields={fields_param}&limit_page_length=1000"
+    url = f"{FRAPPE_API_prod}?fields={fields_param}&limit_page_length=1000"
 
     try:
         response = requests.get(url, headers=HEADERS)
@@ -399,14 +402,89 @@ def extraer_consumibles():
     print(f"✅ Archivo '{archivo_salida}' generado con {filas_totales} filas.")
 
 
+
+# ------------------------------------------------
+
+
+def transferirPendientes():
+    archivos = ["columnas_extraidasONT.csv", "columnas_extraidasDeco.csv"]
+    url_frappe = FRAPPE_API + "/Stock%20Entry"
+    headers = {
+        "Authorization": f"token {API_KEY}:{API_SECRET}",
+        "Content-Type": "application/json"
+    }
+    total_transferencias = 0
+
+    for archivo in archivos:
+        with open(archivo, newline='', encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            encabezados = reader.fieldnames
+            filas_actualizadas = []
+
+            for fila in reader:
+                transferencia = fila.get("Transferencia?", "").strip()
+                serie = fila.get("ONT (modem fibra)", "").strip() or fila.get("Deco", "").strip()
+                transferido = False
+
+                if transferencia and serie:
+                    partes = [p.strip() for p in transferencia.split(",")]
+                    if len(partes) == 2:
+                        origen, destino = partes
+                        payload = {
+                            "stock_entry_type": "Material Transfer",
+                            "purpose": "Material Transfer",
+                            "docstatus": 1,
+                            "items": [{
+                                "item_code": "",
+                                "qty": 1,
+                                "serial_no": serie,
+                                "s_warehouse": origen,
+                                "t_warehouse": destino
+                            }]
+                        }
+
+                        # Buscar item_code desde series_frappe
+                        with open("series_frappe.csv", newline='', encoding="utf-8") as f_series:
+                            reader_series = csv.DictReader(f_series)
+                            for row in reader_series:
+                                if row.get("name", "").strip() == serie:
+                                    payload["items"][0]["item_code"] = row.get("item_code", "").strip()
+                                    break
+
+                        print(f"🔁 Transfiriendo {serie} de {origen} a {destino}...")
+                        response = requests.post(url_frappe, json=payload, headers=headers)
+                        if response.status_code == 200:
+                            print(f"✅ Transferencia realizada para {serie}")
+                            total_transferencias += 1
+                            transferido = True
+                        else:
+                            print(f"❌ Error en transferencia de {serie}: {response.status_code} {response.text}")
+
+                # Si fue transferido correctamente, limpiar la columna
+                if transferido:
+                    fila["Transferencia?"] = ""
+                filas_actualizadas.append(fila)
+
+        # Sobrescribir el archivo con los cambios
+        with open(archivo, "w", newline='', encoding="utf-8") as f_out:
+            writer = csv.DictWriter(f_out, fieldnames=encabezados)
+            writer.writeheader()
+            writer.writerows(filas_actualizadas)
+
+    if total_transferencias == 0:
+        print("✅ No hay transferencias pendientes.")
+    else:
+        print(f"🏁 Total de transferencias realizadas: {total_transferencias}")
+
+
 # ------------------------------------------------
 def deliveryNote():
     if hay_que_revisar():
         print("🚫 No se generó la nota de entrega. Revisá los archivos antes de continuar.")
         return
 
-    FRAPPE_API = "http://localhost/api/resource/Delivery%20Note"
-    COMMENT_API = "http://localhost/api/resource/Communication"
+    FRAPPE_API_delivery = FRAPPE_API+"/Delivery%20Note"
+    COMMENT_API = FRAPPE_API+"/Communication"
     HEADERS = {
         "Authorization": f"token {API_KEY}:{API_SECRET}",
         "Content-Type": "application/json"
@@ -552,7 +630,7 @@ def deliveryNote():
         }
 
         print(f"📦 Enviando nota de entrega para '{almacen}' con {len(items)} ítems...")
-        response = requests.post(FRAPPE_API, headers=HEADERS, json=payload)
+        response = requests.post(FRAPPE_API_delivery, headers=HEADERS, json=payload)
 
         if response.status_code == 200:
             docname = response.json()["data"]["name"]
@@ -561,9 +639,34 @@ def deliveryNote():
                 agregar_comentario(docname, comentario_html)
         else:
             print(f"❌ Error al crear nota de entrega para {almacen}:")
-            print(response.status_code, response.text)
+            # print(response.status_code, response.text)
 
 
+def abrirFotosNoRecibidos():
+    archivos = ["columnas_extraidasONT.csv", "columnas_extraidasDeco.csv"]
+    campo_fotos = "foto (no recibido)"
+    urls = set()
+
+    for archivo in archivos:
+        try:
+            with open(archivo, newline='', encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for fila in reader:
+                    fotos_raw = fila.get(campo_fotos, "").strip()
+                    if fotos_raw:
+                        for link in fotos_raw.split("\n"):
+                            url = link.strip()
+                            if url.startswith("http"):
+                                urls.add(url)
+        except Exception as e:
+            print(f"⚠️ No se pudo procesar {archivo}: {e}")
+
+    if not urls:
+        return
+
+    print(f"Abriendo {len(urls)} fotos en el navegador...")
+    for url in urls:
+        webbrowser.open_new_tab(url)
 
 def ultimaOTconsumida():
     archivo = archivo_crudo
@@ -575,18 +678,19 @@ def ultimaOTconsumida():
     if ultima_fila and len(ultima_fila) > 5:
         print()
         print()
-        print(f"Último valor columna F en '{archivo}': {ultima_fila[5]}")
+        print(f"Última OT del {archivo}: {ultima_fila[5]}")
         print()
         print()
     else:
-        print(f"No se pudo leer la columna F en la última fila de '{archivo}'.")
+        print(f"No se pudo leer la OT en la última fila de '{archivo}'.")
 
 
 
 def main():
     os.system("clear")
-
-    borrar_archivos_csv()  # Limpieza previa
+    
+    # Limpieza previa
+    borrar_archivos_csv()
 
     #obtencion de datos
     obtenerCrudo()
@@ -597,6 +701,12 @@ def main():
     extraer_columnas_ont()
     extraer_columnas_deco()
     extraer_consumibles()
+
+    #transferencias
+    transferirPendientes()
+    
+    #si tiene seguro que abre, sino no
+    abrirFotosNoRecibidos()
 
     # Deliverys
     print()
