@@ -7,7 +7,7 @@ import webbrowser
 from datetime import date
 from collections import defaultdict
 
-
+#que te chupe un pingo porque es en localhost
 API_KEY = "853b8fac3341fda"
 API_SECRET = "2a38fe394557601"
 
