@@ -530,7 +530,7 @@ def deliveryNote():
                     if not almacen:
                         continue
                     fila_html = "".join(f"<td>{celda.strip()}</td>" for celda in fila[:15])
-                    comentarios[f"{almacen} - QPS"].append(f"<tr>{fila_html}</tr>")
+                    comentarios[f"{almacen}"].append(f"<tr>{fila_html}</tr>")
         return comentarios
 
     comentarios_por_almacen = comentarios_en_tabla_html()
