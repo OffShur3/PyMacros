@@ -11,6 +11,9 @@ from collections import defaultdict
 API_KEY = "853b8fac3341fda"
 API_SECRET = "2a38fe394557601"
 
+#crudo
+url_csv = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSjcvuqJyiIwCYdSkAT7WGHYnGFvti3BaiswovWWWMgSTwdbVXKZQU1KrLXeiT5wJSpoqSEP9IuJ9V6/pub?gid=549752266&single=true&output=csv"
+
 # Nombre de los archivos a generar
 archivo_crudo = "crudo.csv" #para el crudo de las OT
 archivo_Series = "series_frappe.csv" #para el listado de series de frappe
@@ -57,8 +60,6 @@ def hay_que_revisar(only_boolean=False):
 
 
 def obtenerCrudo():
-    url_csv = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSjcvuqJyiIwCYdSkAT7WGHYnGFvti3BaiswovWWWMgSTwdbVXKZQU1KrLXeiT5wJSpoqSEP9IuJ9V6/pub?gid=549752266&single=true&output=csv"
-
     print("Descargando CSV...")
     resp = requests.get(url_csv)
     resp.raise_for_status()
@@ -67,13 +68,18 @@ def obtenerCrudo():
 
     print("Filtrando filas que no hayan sido consumidas...")
     reader = csv.reader(lineas, delimiter=',')
-    filas_filtradas = [
-        fila for fila in reader
+    filas_filtradas = []
+
+    for fila in reader:
         if len(fila) > 25 and fila[4].strip() == "" and (
             fila[23].strip() == "EXITOSA" or
             fila[23].strip() == "CONTINGENCIA / SUSPENDIDA"
-        )
-    ]
+        ):
+            # Columna D (índice 3) es el técnico. Le agregamos " - QPS" si no lo tiene.
+            tecnico = fila[3].strip()
+            if tecnico and not tecnico.endswith(" - QPS"):
+                fila[3] = f"{tecnico} - QPS"
+            filas_filtradas.append(fila)
 
     if not filas_filtradas:
         print("🚫 No hay filas pendientes de consumo. Terminando ejecución.")
@@ -200,7 +206,7 @@ def extraer_columnas_ont():
                 ont = fila[9].strip()
                 foto = fila[8].strip()  # crudo (con comas)
                 cargo_ot_base = fila[3].strip()
-                cargo_ot = f"{cargo_ot_base} - QPS" if cargo_ot_base else ""
+                cargo_ot = f"{cargo_ot_base}" if cargo_ot_base else ""
 
                 # Determinar origen equipo
                 if ont in dic_ont_origen and dic_ont_origen[ont].strip():
@@ -283,7 +289,7 @@ def extraer_columnas_deco():
                 deco_series = fila[10].strip().split()  # Puede haber múltiples series separados por espacio
                 foto = fila[8].strip()
                 cargo_ot_base = fila[3].strip()
-                cargo_ot = f"{cargo_ot_base} - QPS" if cargo_ot_base else ""
+                cargo_ot = f"{cargo_ot_base}" if cargo_ot_base else ""
 
                 for deco in deco_series:
                     origen_equipo = "No"
@@ -356,7 +362,7 @@ def extraer_consumibles():
                 campo_cable = fila[13].strip()  # columna N
                 campo_consumible = fila[14].strip()  # columna O
                 cargo_ot_base = fila[3].strip()  # columna D
-                warehouse = f"{cargo_ot_base} - QPS" if cargo_ot_base else ""
+                warehouse = f"{cargo_ot_base}" if cargo_ot_base else ""
 
                 # 🔹 Cables (de columna N)
                 if " - " in campo_cable:
@@ -380,7 +386,7 @@ def extraer_consumibles():
             serie = fila.get("Consumir", "").strip()
             almacen = fila.get("Cargó OT", "").strip()
             if serie and almacen:
-                warehouse = f"{almacen} - QPS"
+                warehouse = f"{almacen}"
                 seriales_por_almacen[warehouse] += 1
 
     for warehouse, cantidad in seriales_por_almacen.items():
